@@ -26,8 +26,20 @@
  * Since there is only one init_mm in the entire system, keep it simple
  * and size this cpu_bitmask to NR_CPUS.
  */
+#ifdef CONFIG_LRU_GEN
+/* init_mm is statically allocated; give it a static, zero-initialized state
+ * (list.prev/next == NULL, matching the original inline field) so nothing
+ * dereferences a NULL mm->lrugen even if CONFIG_DEBUG_VM is enabled. */
+static struct lru_gen_mm_state init_mm_lru_gen_state = {
+	.mm = &init_mm,
+};
+#endif
+
 struct mm_struct init_mm = {
 	.mm_rb		= RB_ROOT,
+#ifdef CONFIG_LRU_GEN
+	.lrugen		= &init_mm_lru_gen_state,
+#endif
 #ifdef CONFIG_SPECULATIVE_PAGE_FAULT
 #ifdef CONFIG_SPECULATIVE_PAGE_FAULT_DEBUG
 	.mm_seq		= __SEQLOCK_UNLOCKED(init_mm.mm_seq),

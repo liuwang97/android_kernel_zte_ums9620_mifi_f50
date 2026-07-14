@@ -5102,6 +5102,7 @@ static void __mem_cgroup_free(struct mem_cgroup *memcg)
 		free_mem_cgroup_per_node_info(memcg, node);
 	free_percpu(memcg->vmstats_percpu);
 	free_percpu(memcg->vmstats_local);
+	lru_gen_free_mm_list(memcg);
 	kfree(memcg);
 }
 
@@ -5151,6 +5152,9 @@ static struct mem_cgroup *mem_cgroup_alloc(void)
 	for_each_node(node)
 		if (alloc_mem_cgroup_per_node_info(memcg, node))
 			goto fail;
+
+	if (lru_gen_alloc_mm_list(memcg))
+		goto fail;
 
 	if (memcg_wb_domain_init(memcg, GFP_KERNEL))
 		goto fail;

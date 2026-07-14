@@ -631,6 +631,34 @@ static int dwc3_gadget_set_ep_config(struct dwc3_ep *dep, unsigned int action)
 	return dwc3_send_gadget_ep_cmd(dep, DWC3_DEPCMD_SETEPCONFIG, &params);
 }
 
+#ifdef CONFIG_USB_PAM
+/*
+ * Counts outstanding usb_phy_init() calls on the PAM/SIPA phy. The SPRD
+ * RNDIS gadget marks BOTH data endpoints 0xff, so bring-up issues two
+ * inits (pamu3 refcount 0->2); a clean teardown must issue the same
+ * number of usb_phy_set_suspend() calls to drive the refcount back to 0
+ * (only then does pamu3 run clk_disable + SIPA_DISCONNECT_END). A bool
+ * latch collapsed the two suspends into one, leaking the refcount and
+ * wedging the next enumeration -> silent boot watchdog reset.
+ */
+static int dwc3_pam_pending;
+
+static bool dwc3_gadget_eps_still_enabled(struct dwc3 *dwc)
+{
+	u32 i;
+
+	/* skip physical ep0/ep1 (the control endpoint pair) */
+	for (i = 2; i < dwc->num_eps; i++) {
+		struct dwc3_ep *dep = dwc->eps[i];
+
+		if (dep && (dep->flags & DWC3_EP_ENABLED))
+			return true;
+	}
+
+	return false;
+}
+#endif
+
 /**
  * __dwc3_gadget_ep_enable - initializes a hw endpoint
  * @dep: endpoint to be initialized
@@ -697,9 +725,10 @@ static int __dwc3_gadget_ep_enable(struct dwc3_ep *dep, unsigned int action)
 	 * Response Update Transfer command.
 	 */
 #ifdef CONFIG_USB_PAM
-	if (dep->endpoint.android_kabi_reserved1 == 0xff)
+	if (dep->endpoint.android_kabi_reserved1 == 0xff) {
 		usb_phy_init(dwc->pam);
-	else {
+		dwc3_pam_pending++;
+	} else {
 #endif
 	if ((usb_endpoint_xfer_bulk(desc) && !dep->stream_capable) ||
 			usb_endpoint_xfer_int(desc)) {
@@ -862,10 +891,6 @@ static int dwc3_gadget_ep_disable(struct usb_ep *ep)
 	dep = to_dwc3_ep(ep);
 	dwc = dep->dwc;
 
-#ifdef CONFIG_USB_PAM
-	if (ep->android_kabi_reserved1 == 0xff)
-		usb_phy_set_suspend(dwc->pam, 1);
-#endif
 	if (dev_WARN_ONCE(dwc->dev, !(dep->flags & DWC3_EP_ENABLED),
 					"%s is already disabled\n",
 					dep->name))
@@ -875,6 +900,24 @@ static int dwc3_gadget_ep_disable(struct usb_ep *ep)
 	ret = __dwc3_gadget_ep_disable(dep);
 	spin_unlock_irqrestore(&dwc->lock, flags);
 
+#ifdef CONFIG_USB_PAM
+	/*
+	 * The PAM/SIPA fabric is shared by the whole controller, not just
+	 * the marked RNDIS data endpoints: once it is suspended, End
+	 * Transfer times out (-110) on every endpoint that is still being
+	 * torn down, Run/Stop then fails and a core soft reset is forced.
+	 * Composite teardown disables the RNDIS function (the marked pair)
+	 * first, so suspending here wedges the MTP/ADB endpoints that are
+	 * disabled afterwards. Defer the suspend until the last endpoint
+	 * is gone.
+	 */
+	if (dwc3_pam_pending && !dwc3_gadget_eps_still_enabled(dwc)) {
+		while (dwc3_pam_pending > 0) {
+			usb_phy_set_suspend(dwc->pam, 1);
+			dwc3_pam_pending--;
+		}
+	}
+#endif
 	return ret;
 }
 
@@ -2074,6 +2117,55 @@ static void dwc3_gadget_disable_irq(struct dwc3 *dwc);
 static void __dwc3_gadget_stop(struct dwc3 *dwc);
 static int __dwc3_gadget_start(struct dwc3 *dwc);
 
+/*
+ * dwc3_device_soft_reset - device-only core soft reset for stuck controller
+ * @dwc: pointer to our context structure
+ *
+ * Used to recover when Run/Stop fails to halt the controller (typically
+ * because the SIPA/PAM fabric died under active PAM endpoints and End
+ * Transfer commands timed out). Unlike dwc3_core_soft_reset() this does
+ * not touch the PHYs (their init refcounts stay balanced) and restores
+ * the device registers CSFTRST wipes, so the next pullup(1) can start
+ * from a clean state through the normal __dwc3_gadget_start() path.
+ *
+ * Must be called in sleepable context without dwc->lock held.
+ */
+static int dwc3_device_soft_reset(struct dwc3 *dwc)
+{
+	u32		dcfg;
+	u32		reg;
+	int		retries = 1000;
+
+	dcfg = dwc3_readl(dwc->regs, DWC3_DCFG);
+
+	reg = dwc3_readl(dwc->regs, DWC3_DCTL);
+	reg |= DWC3_DCTL_CSFTRST;
+	dwc3_writel(dwc->regs, DWC3_DCTL, reg);
+
+	if (dwc3_is_usb31(dwc) && dwc->revision >= DWC3_USB31_REVISION_190A)
+		retries = 100;
+
+	do {
+		reg = dwc3_readl(dwc->regs, DWC3_DCTL);
+		if (!(reg & DWC3_DCTL_CSFTRST))
+			goto done;
+
+		if (dwc3_is_usb31(dwc) &&
+		    dwc->revision >= DWC3_USB31_REVISION_190A)
+			msleep(20);
+		else
+			udelay(1);
+	} while (--retries);
+
+	return -ETIMEDOUT;
+
+done:
+	dwc3_writel(dwc->regs, DWC3_DCFG, dcfg);
+	dwc3_event_buffers_setup(dwc);
+
+	return 0;
+}
+
 static int dwc3_gadget_pullup(struct usb_gadget *g, int is_on)
 {
 	struct dwc3		*dwc = gadget_to_dwc(g);
@@ -2155,6 +2247,20 @@ static int dwc3_gadget_pullup(struct usb_gadget *g, int is_on)
 
 	ret = dwc3_gadget_run_stop(dwc, is_on, false);
 	spin_unlock_irqrestore(&dwc->lock, flags);
+
+	/*
+	 * If the controller refuses to halt on disconnect (DEVCTRLHLT never
+	 * asserts because in-flight PAM transfers could not be ended), force
+	 * a device-only soft reset so it does not stay wedged until reboot.
+	 * Not present in stock 5.4.254 (whose OFF path has no run_stop
+	 * recovery); this is mainline-derived and stays dormant once the
+	 * PAM refcount is balanced (run_stop then no longer times out).
+	 */
+	if (ret == -ETIMEDOUT && !is_on) {
+		dev_info(dwc->dev, "do dwc3 core soft reset!\n");
+		ret = dwc3_device_soft_reset(dwc);
+	}
+
 	enable_irq(dwc->irq_gadget);
 
 	pm_runtime_put(dwc->dev);

@@ -429,8 +429,18 @@ static void pamu3_start(struct sprd_pamu3 *pamu3)
 {
 	u32 value, depth;
 
-	if (atomic_inc_return(&pamu3->ref) == 1)
+	if (atomic_inc_return(&pamu3->ref) == 1) {
 		sprd_pamu3_open(pamu3);
+	} else if (!atomic_read(&pamu3->inited)) {
+		/*
+		 * The refcount says the block is already open but the
+		 * hardware is closed: a previous session leaked the count.
+		 * Reopen so this session still gets an initialized PAM.
+		 */
+		dev_warn(pamu3->dev, "start: ref %d but PAM closed, reopening\n",
+			 atomic_read(&pamu3->ref));
+		sprd_pamu3_open(pamu3);
+	}
 
 	value = readl_relaxed(pamu3->base + PAM_U3_CTL0);
 	if (value & PAMU3_CTL0_BIT_PAM_EN) {
@@ -491,41 +501,107 @@ static int sprd_pamu3_init(struct usb_phy *x)
 	return 0;
 }
 
+/*
+ * Ask PAMU3 to quiesce (RELEASE) and wait for DONE. The stock code read
+ * CTL0 back only twice with no delay, so a busy fabric routinely blew
+ * through the "timeout" and teardown carried on with the release still
+ * in flight -- state that only a reboot could clear. Poll with a real
+ * budget instead; may run with IRQs disabled, so udelay only.
+ */
+static void pamu3_release_quiesce(struct sprd_pamu3 *pamu3)
+{
+	u32 value;
+	int timeout = 500;	/* x 10us = 5ms budget */
+
+	value = readl_relaxed(pamu3->base + PAM_U3_CTL0);
+	value |= PAMU3_CTL0_BIT_RELEASE;
+	writel_relaxed(value, pamu3->base + PAM_U3_CTL0);
+
+	do {
+		value = readl_relaxed(pamu3->base + PAM_U3_CTL0);
+		if (value & PAMU3_CTL0_BIT_DONE)
+			return;
+		udelay(10);
+	} while (--timeout);
+
+	dev_warn(pamu3->dev, "failed to stop PAMU3!!!\n");
+}
+
+static void pamu3_full_stop(struct sprd_pamu3 *pamu3)
+{
+	u32 value;
+
+	value = readl_relaxed(pamu3->base + PAM_U3_CTL0);
+	value &= ~(PAMU3_CTL0_BIT_USB_EN | PAMU3_CTL0_BIT_PAM_EN |
+		   PAMU3_CTL0_BIT_RELEASE);
+	writel_relaxed(value, pamu3->base + PAM_U3_CTL0);
+	clk_disable(pamu3->clk);
+	atomic_set(&pamu3->inited, 0);
+	sipa_disconnect(SIPA_EP_USB, SIPA_DISCONNECT_END);
+}
+
 /* pamu3_set_suspend will be called when uether function is removed */
 static int sprd_pamu3_set_suspend(struct usb_phy *x, int a)
 {
 	struct sprd_pamu3 *pamu3 = container_of(x, struct sprd_pamu3, pam);
-	u32 value;
-	int timeout = 2;
+	int ref;
 
 	if (!atomic_read(&pamu3->inited)) {
 		dev_warn(pamu3->dev, "is already disabled\n");
 		return 0;
 	}
 
-	if (atomic_dec_return(&pamu3->ref)) {
-		sipa_disconnect(SIPA_EP_USB, SIPA_DISCONNECT_START);
-		value = readl_relaxed(pamu3->base + PAM_U3_CTL0);
-		value |= PAMU3_CTL0_BIT_RELEASE;
-		writel_relaxed(value, pamu3->base + PAM_U3_CTL0);
-		do {
-			value = readl_relaxed(pamu3->base + PAM_U3_CTL0);
-			if (!timeout--) {
-				dev_warn(pamu3->dev,
-					 "failed to stop PAMU3!!!\n");
-				break;
-			}
-		} while (!(value & PAMU3_CTL0_BIT_DONE));
-	} else {
-		value = readl_relaxed(pamu3->base + PAM_U3_CTL0);
-		value &= ~(PAMU3_CTL0_BIT_USB_EN | PAMU3_CTL0_BIT_PAM_EN |
-			   PAMU3_CTL0_BIT_RELEASE);
-		writel_relaxed(value, pamu3->base + PAM_U3_CTL0);
-		clk_disable(pamu3->clk);
-		atomic_set(&pamu3->inited, 0);
-		sipa_disconnect(SIPA_EP_USB, SIPA_DISCONNECT_END);
+	/*
+	 * Never let the refcount go below zero: an unpaired suspend (e.g.
+	 * a teardown replayed after a forced close) must not flip the
+	 * open/stop state machine into a branch it cannot recover from.
+	 */
+	ref = atomic_dec_if_positive(&pamu3->ref);
+	if (ref < 0) {
+		dev_warn(pamu3->dev, "suspend with ref 0, ignored\n");
+		return 0;
 	}
+
+	if (ref) {
+		sipa_disconnect(SIPA_EP_USB, SIPA_DISCONNECT_START);
+		pamu3_release_quiesce(pamu3);
+	} else {
+		pamu3_full_stop(pamu3);
+	}
+
 	return 0;
+}
+
+/*
+ * usb_phy_shutdown() entry: drive PAMU3 to the fully-closed state no
+ * matter what the refcount says. The dwc3-sprd glue calls this at both
+ * session boundaries (cable-out teardown end, cable-in bring-up start)
+ * so a reconnect always starts from the same virgin state as the first
+ * boot-time plug-in -- residue here is what wedged the RNDIS control
+ * channel until reboot. No-op when the last teardown was clean.
+ */
+static void sprd_pamu3_force_close(struct usb_phy *x)
+{
+	struct sprd_pamu3 *pamu3 = container_of(x, struct sprd_pamu3, pam);
+	int ref = atomic_read(&pamu3->ref);
+
+	if (!atomic_read(&pamu3->inited)) {
+		if (ref) {
+			dev_warn(pamu3->dev,
+				 "force close: clearing stale ref %d\n", ref);
+			atomic_set(&pamu3->ref, 0);
+		}
+		return;
+	}
+
+	dev_warn(pamu3->dev, "force close: ref %d ctl0 0x%x\n", ref,
+		 readl_relaxed(pamu3->base + PAM_U3_CTL0));
+
+	/* mirror a clean two-phase suspend pair */
+	sipa_disconnect(SIPA_EP_USB, SIPA_DISCONNECT_START);
+	pamu3_release_quiesce(pamu3);
+	pamu3_full_stop(pamu3);
+	atomic_set(&pamu3->ref, 0);
 }
 
 /* PAMU3 attributes */
@@ -732,6 +808,7 @@ static int sprd_pamu3_probe(struct platform_device *pdev)
 
 	pamu3->pam.init = sprd_pamu3_init;
 	pamu3->pam.set_suspend = sprd_pamu3_set_suspend;
+	pamu3->pam.shutdown = sprd_pamu3_force_close;
 
 	pamu3->pam.type = (enum usb_phy_type)USB_PAM_TYPE_USB3;
 

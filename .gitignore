@@ -1,0 +1,63 @@
+# Normal rules (Linux kernel style)
+.*
+*.o
+*.o.*
+*.a
+*.s
+*.ko
+*.so
+*.so.dbg
+*.mod
+*.mod.c
+*.lto.o
+*.symversions
+*.order
+*.elf
+*.bin
+*.gz
+*.lz4
+*.lzma
+*.lzo
+*.xz
+*.zst
+*.dtb
+*.dtb.S
+*.dtbo
+*.dtbo.S
+*.dwo
+*.tmp
+*.cmd
+modules.builtin
+Module.symvers
+!.gitignore
+!.mailmap
+
+# Top-level generic files
+/tags
+/TAGS
+/linux
+/vmlinux
+/vmlinux.32
+/vmlinux.symvers
+/vmlinuz
+/System.map
+/Module.markers
+
+# Kernel build output
+/out/
+/out-*/
+
+# Compiled ELF / packed images we don't want in-tree
+arch/*/boot/Image
+arch/*/boot/Image.*
+arch/*/boot/zImage
+arch/*/boot/compressed/vmlinux
+
+# Overlay: keep the intentionally-prebuilt vendor-replacement modules,
+# but ignore their build scratch. (The .ko under kernel/module_overlay/modules/
+# are force-added on purpose.)
+
+# Editor / OS cruft
+*~
+.swp
+.DS_Store

@@ -39,6 +39,16 @@
 
 #include "debug.h"
 
+
+/*
+ * ZTE .254 ABI compat: the stock dwc3-sprd.ko glue imports this flag
+ * (host OS type hint). The stock core only defines and exports it; all
+ * reads/writes happen in other modules, so an exported definition is
+ * enough to keep the module ABI intact.
+ */
+int USB_SYSTEM_FLAG;
+EXPORT_SYMBOL(USB_SYSTEM_FLAG);
+
 #define DWC3_DEFAULT_AUTOSUSPEND_DELAY	500 /* ms */
 
 /**

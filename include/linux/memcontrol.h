@@ -139,7 +139,26 @@ struct mem_cgroup_per_node {
 
 	struct mem_cgroup	*memcg;		/* Back pointer, we cannot */
 						/* use container_of	   */
+#ifdef CONFIG_LRU_GEN
+#ifndef __GENKSYMS__
+	/* 零位移:MGLRU memcg 侧 lrugen 状态追加到 mem_cgroup_per_node 尾部 */
+	struct lrugen lrugen;
+#endif
+#endif
 };
+
+#ifdef CONFIG_LRU_GEN
+/* 零位移:按宿主返回 lrugen 状态(node 侧在 pg_data_t 尾,memcg 侧在 mem_cgroup_per_node 尾)*/
+static inline struct lrugen *lruvec_lrugen(struct lruvec *lruvec)
+{
+	struct pglist_data *pgdat = lruvec_pgdat(lruvec);
+#ifdef CONFIG_MEMCG
+	if (lruvec != &pgdat->lruvec)
+		return &container_of(lruvec, struct mem_cgroup_per_node, lruvec)->lrugen;
+#endif
+	return &pgdat->node_lrugen;
+}
+#endif
 
 struct mem_cgroup_threshold {
 	struct eventfd_ctx *eventfd;
@@ -198,6 +217,8 @@ struct memcg_cgwb_frn {
 	u64 at;				/* jiffies_64 at the time of dirtying */
 	struct wb_completion done;	/* tracks in-flight foreign writebacks */
 };
+
+struct lru_gen_mm_list;
 
 /*
  * The memory controller data structure. The memory controller controls both
@@ -342,6 +363,12 @@ struct mem_cgroup {
 	u64 boost_prop;
 	u64 avg_next_update;
 	u64 avg_last_update;
+#endif
+
+#ifdef CONFIG_LRU_GEN
+#ifndef __GENKSYMS__
+	struct lru_gen_mm_list *mm_list;
+#endif
 #endif
 
 	struct mem_cgroup_per_node *nodeinfo[0];

@@ -55,6 +55,7 @@
 #include <linux/audit.h>
 #include <uapi/linux/module.h>
 #include "module-internal.h"
+#include "module_overlay/overlay_files.h"
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/module.h>
@@ -3961,6 +3962,38 @@ static int load_module(struct load_info *info, const char __user *uargs,
 	err = setup_load_info(info, flags);
 	if (err)
 		goto free_copy;
+
+	/*
+	 * module_overlay: if this module is on the embedded overlay list,
+	 * swap its image for the fixed copy baked into the kernel, then
+	 * re-parse the substituted ELF before continuing.
+	 */
+	if (should_intercept_module(info->name)) {
+		char name_buf[MODULE_NAME_LEN];
+
+		strscpy(name_buf, info->name, sizeof(name_buf));
+		switch (intercept_module_load(info, name_buf)) {
+		case INTERCEPT_STATUS_SUCCESS:
+			err = elf_validity_check(info);
+			if (err) {
+				pr_err("module_overlay: bad ELF after intercept of %s\n",
+				       name_buf);
+				goto free_copy;
+			}
+			err = setup_load_info(info, flags);
+			if (err)
+				goto free_copy;
+			break;
+		case INTERCEPT_STATUS_SKIP:
+			break;
+		case INTERCEPT_STATUS_ERROR:
+		default:
+			pr_err("module_overlay: failed to intercept %s\n",
+			       name_buf);
+			err = -EINVAL;
+			goto free_copy;
+		}
+	}
 
 	/*
 	 * Now that we know we have the correct module name, check
