@@ -25,6 +25,8 @@
 #include "core.h"
 #include "debug.h"
 #include "gadget.h"
+
+extern int USB_SYSTEM_FLAG;
 #include "io.h"
 
 static void __dwc3_ep0_do_control_status(struct dwc3 *dwc, struct dwc3_ep *dep);
@@ -799,6 +801,23 @@ static void dwc3_ep0_inspect_setup(struct dwc3 *dwc,
 		goto out;
 
 	trace_dwc3_ctrl_req(ctrl);
+
+	/*
+	 * ZTE .254 ABI parity: host OS detection consumed by the stock
+	 * dwc3-sprd.ko glue (usb_system sysfs node read by the Android
+	 * framework). The Windows RNDIS driver probes with this vendor
+	 * request right after enumeration; anything else seen first
+	 * marks the host as non-Windows (2). The glue clears the flag
+	 * back to 0 on disconnect.
+	 */
+	if (ctrl->bRequestType == 0xc0 &&
+	    le16_to_cpu(ctrl->wIndex) == 4 &&
+	    le16_to_cpu(ctrl->wLength) == 16) {
+		USB_SYSTEM_FLAG = 1;
+		pr_info("Get System is Windows\n");
+	} else if (!USB_SYSTEM_FLAG) {
+		USB_SYSTEM_FLAG = 2;
+	}
 
 	len = le16_to_cpu(ctrl->wLength);
 	if (!len) {

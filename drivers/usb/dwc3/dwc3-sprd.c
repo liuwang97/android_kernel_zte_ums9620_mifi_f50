@@ -580,6 +580,12 @@ static int dwc3_sprd_otg_start_peripheral(struct dwc3_sprd *sdwc, int on)
 
 		usb_phy_vbus_off(sdwc->ss_phy);
 		pm_runtime_get_sync(dwc->dev);
+		/*
+		 * Start every session from a fully closed PAM: if the previous
+		 * teardown leaked (crash, raced disconnect), the residue must
+		 * not taint this session. No-op after a clean teardown.
+		 */
+		usb_phy_shutdown(dwc->pam);
 		/* phy set vbus connected after phy_init*/
 		usb_phy_notify_connect(sdwc->ss_phy, 0);
 		usb_role_switch_set_role(dwc->role_sw, USB_ROLE_DEVICE);
@@ -593,18 +599,38 @@ static int dwc3_sprd_otg_start_peripheral(struct dwc3_sprd *sdwc, int on)
 		}
 		sdwc->glue_dr_mode = USB_DR_MODE_PERIPHERAL;
 	} else {
+		int wait = 25;	/* x 20ms = 500ms teardown budget */
+
 		dev_info(sdwc->dev, "%s: turn off gadget %s\n",
 					__func__, dwc->gadget.name);
 
 		/* phy set vbus disconnected */
 		usb_phy_notify_disconnect(sdwc->ss_phy, 0);
-		/* dwc3 has enough get a disconnect irq*/
-		msleep(20);
-		dev_info(sdwc->dev, "dwc->connected %d\n", dwc->connected);
+		/*
+		 * Wait for the controller's disconnect interrupt to be fully
+		 * processed instead of napping a blind 20ms: composite
+		 * teardown (function disables + PAM refcount drain) runs in
+		 * the gadget IRQ thread and clears dwc->connected only once
+		 * it has finished. Flushing events or cutting power while it
+		 * is still running strands the PAM/SIPA fabric half-released
+		 * and wedges the RNDIS control path of every later session
+		 * until reboot.
+		 */
+		do {
+			msleep(20);
+		} while (dwc->connected && --wait);
+		dev_info(sdwc->dev, "dwc->connected %d (wait left %d)\n",
+			 dwc->connected, wait);
 
 		usb_gadget_set_state(&dwc->gadget, USB_STATE_NOTATTACHED);
 		dwc3_flush_all_events(sdwc);
 		usb_role_switch_set_role(dwc->role_sw, USB_ROLE_DEVICE);
+		/*
+		 * Session over: force PAMU3 fully closed regardless of how
+		 * teardown went, so the next bring-up starts from the same
+		 * virgin state as a boot-time first connect.
+		 */
+		usb_phy_shutdown(dwc->pam);
 		pm_runtime_put_sync(dwc->dev);
 		sdwc->glue_dr_mode = USB_DR_MODE_UNKNOWN;
 	}
