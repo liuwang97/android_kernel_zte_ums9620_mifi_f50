@@ -349,6 +349,9 @@ static bool need_activate_page_drain(int cpu)
 
 void activate_page(struct page *page)
 {
+	if (lru_gen_enabled())
+		return;
+
 	page = compound_head(page);
 	if (PageLRU(page) && !PageActive(page) && !PageUnevictable(page)) {
 		struct pagevec *pvec = &get_cpu_var(activate_page_pvecs);
@@ -368,6 +371,9 @@ static inline void activate_page_drain(int cpu)
 void activate_page(struct page *page)
 {
 	pg_data_t *pgdat = page_pgdat(page);
+
+	if (lru_gen_enabled())
+		return;
 
 	page = compound_head(page);
 	spin_lock_irq(&pgdat->lru_lock);
@@ -419,6 +425,11 @@ void mark_page_accessed(struct page *page)
 	if (!PageActive(page) && !PageUnevictable(page) &&
 			PageReferenced(page)) {
 
+		if (lru_gen_enabled()) {
+			page_inc_usage(page);
+			goto done;
+		}
+
 		/*
 		 * If the page is on the LRU, queue it for activation via
 		 * activate_page_pvecs. Otherwise, assume the page is on a
@@ -439,6 +450,7 @@ void mark_page_accessed(struct page *page)
 	} else if (!PageReferenced(page)) {
 		SetPageReferenced(page);
 	}
+done:
 	if (page_is_idle(page))
 		clear_page_idle(page);
 }
@@ -624,7 +636,8 @@ static void lru_deactivate_file_fn(struct page *page, struct lruvec *lruvec,
 static void lru_deactivate_fn(struct page *page, struct lruvec *lruvec,
 			    void *arg)
 {
-	if (PageLRU(page) && PageActive(page) && !PageUnevictable(page)) {
+	if (PageLRU(page) && !PageUnevictable(page) &&
+	    (PageActive(page) || lru_gen_enabled())) {
 #ifndef CONFIG_LRU_BALANCE_BASE_THRASHING
 		int file = page_is_file_cache(page);
 #endif
@@ -742,7 +755,8 @@ void deactivate_file_page(struct page *page)
  */
 void deactivate_page(struct page *page)
 {
-	if (PageLRU(page) && PageActive(page) && !PageUnevictable(page)) {
+	if (PageLRU(page) && !PageUnevictable(page) &&
+	    (PageActive(page) || lru_gen_enabled())) {
 		struct pagevec *pvec = &get_cpu_var(lru_deactivate_pvecs);
 
 		get_page(page);
