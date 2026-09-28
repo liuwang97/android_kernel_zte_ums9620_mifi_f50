@@ -665,6 +665,10 @@ static int rndis_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
 				goto fail;
 		}
 		usb_ep_enable(rndis->notify);
+		/* F3: drop stale RESPONSE_AVAILABLE latch on (re)enumeration so
+		 * rndis_response_available() is not wedged by a notify_count stuck
+		 * >=1 (orphaned by an EndTransfer timeout on the notify EP). */
+		atomic_set(&rndis->notify_count, 0);
 
 	} else if (intf == rndis->data_id) {
 		struct net_device	*net;
@@ -740,6 +744,12 @@ static void rndis_disable(struct usb_function *f)
 	sprd_gether_disconnect(&rndis->port);
 
 	usb_ep_disable(rndis->notify);
+	/* F3: mirror f_ncm.c - force-clear an orphaned notify (endxfer -110
+	 * leaves rndis_response_complete unrun, so notify_count stays >=1). */
+	if (atomic_read(&rndis->notify_count)) {
+		usb_ep_dequeue(rndis->notify, rndis->notify_req);
+		atomic_set(&rndis->notify_count, 0);
+	}
 	rndis->notify->desc = NULL;
 }
 
