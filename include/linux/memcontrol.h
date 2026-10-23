@@ -199,6 +199,8 @@ struct memcg_cgwb_frn {
 	struct wb_completion done;	/* tracks in-flight foreign writebacks */
 };
 
+struct lru_gen_mm_list;
+
 /*
  * The memory controller data structure. The memory controller controls both
  * page cache and RSS per cgroup. We would eventually like to provide
@@ -342,6 +344,12 @@ struct mem_cgroup {
 	u64 boost_prop;
 	u64 avg_next_update;
 	u64 avg_last_update;
+#endif
+
+#ifdef CONFIG_LRU_GEN
+#ifndef __GENKSYMS__
+	struct lru_gen_mm_list *mm_list;
+#endif
 #endif
 
 	struct mem_cgroup_per_node *nodeinfo[0];
