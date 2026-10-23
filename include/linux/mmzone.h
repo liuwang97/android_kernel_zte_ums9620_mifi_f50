@@ -766,6 +766,9 @@ typedef struct pglist_data {
 	enum zone_type kcompactd_classzone_idx;
 	wait_queue_head_t kcompactd_wait;
 	struct task_struct *kcompactd;
+#ifndef __GENKSYMS__
+	bool proactive_compact_trigger;
+#endif
 #endif
 	/*
 	 * This is a per-node reserve of pages that are not available
