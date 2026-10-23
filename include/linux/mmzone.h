@@ -722,6 +722,13 @@ struct deferred_split {
  * per-zone basis.
  */
 struct bootmem_data;
+
+/*
+ * Maximum number of kswapd threads that may be run per NUMA node.
+ * The active count is controlled via the vm.kswapd_threads sysctl.
+ */
+#define MAX_KSWAPD_THREADS 16
+
 typedef struct pglist_data {
 	struct zone node_zones[MAX_NR_ZONES];
 	struct zonelist node_zonelists[MAX_ZONELISTS];
@@ -754,8 +761,7 @@ typedef struct pglist_data {
 	int node_id;
 	wait_queue_head_t kswapd_wait;
 	wait_queue_head_t pfmemalloc_wait;
-	struct task_struct *kswapd;	/* Protected by
-					   mem_hotplug_begin/end() */
+	struct task_struct *kswapd;
 	int kswapd_order;
 	enum zone_type kswapd_classzone_idx;
 
@@ -807,6 +813,11 @@ typedef struct pglist_data {
 	/* Per-node vmstats */
 	struct per_cpu_nodestat __percpu *per_cpu_nodestats;
 	atomic_long_t		vm_stat[NR_VM_NODE_STAT_ITEMS];
+#ifndef __GENKSYMS__
+	/* 零位移:multi-kswapd/proactive 状态追加到 pg_data_t 尾部(vm_stat 之后),不位移任何原字段 */
+	struct task_struct *mkswapd[MAX_KSWAPD_THREADS];
+	bool proactive_compact_trigger;
+#endif
 } pg_data_t;
 
 #define node_present_pages(nid)	(NODE_DATA(nid)->node_present_pages)

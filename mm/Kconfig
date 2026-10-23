@@ -811,4 +811,5 @@ config LRU_BALANCE_BASE_THRASHING
 	help
 	  balance LRU lists based on relative thrashing.
 
+source "mm/damon/Kconfig"
 endmenu
