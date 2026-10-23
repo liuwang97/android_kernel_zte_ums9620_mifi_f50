@@ -2508,6 +2508,12 @@ extern int min_free_kbytes;
 extern int watermark_boost_factor;
 extern int watermark_scale_factor;
 
+/* vmscan.c: number of kswapd threads to run per NUMA node */
+#define DEF_KSWAPD_THREADS_PER_NODE 1
+extern int kswapd_threads;
+extern int kswapd_threads_sysctl_handler(struct ctl_table *, int,
+					 void __user *, size_t *, loff_t *);
+
 /* nommu.c */
 extern atomic_long_t mmap_pages_allocated;
 extern int nommu_shrink_inode_mappings(struct inode *, size_t, size_t);

@@ -4230,6 +4230,14 @@ unsigned long shrink_all_memory(unsigned long nr_to_reclaim)
 }
 #endif /* CONFIG_HIBERNATION */
 
+/*
+ * Number of kswapd threads to run on each NUMA node.  Controlled via the
+ * vm.kswapd_threads sysctl; the default of 1 preserves the original,
+ * single-kswapd-per-node behaviour.
+ */
+int kswapd_threads = DEF_KSWAPD_THREADS_PER_NODE;
+static int kswapd_threads_current = DEF_KSWAPD_THREADS_PER_NODE;
+
 /* It's optimal to keep kswapds on the same CPUs as their memory, but
    not required for correctness.  So if the last cpu in a node goes
    away, we get changed to run anywhere: as the first one comes back,
@@ -4241,14 +4249,66 @@ static int kswapd_cpu_online(unsigned int cpu)
 	for_each_node_state(nid, N_MEMORY) {
 		pg_data_t *pgdat = NODE_DATA(nid);
 		const struct cpumask *mask;
+		int i;
 
 		mask = cpumask_of_node(pgdat->node_id);
 
-		if (cpumask_any_and(cpu_online_mask, mask) < nr_cpu_ids)
+		if (cpumask_any_and(cpu_online_mask, mask) < nr_cpu_ids) {
 			/* One of our CPUs online: restore mask */
-			set_cpus_allowed_ptr(pgdat->kswapd, mask);
+			for (i = 0; i < MAX_KSWAPD_THREADS; i++)
+				if (pgdat->mkswapd[i])
+					set_cpus_allowed_ptr(pgdat->mkswapd[i],
+							     mask);
+		}
 	}
 	return 0;
+}
+
+/*
+ * Start the configured number of kswapd threads for a single node.  Threads
+ * that are already running are left untouched, so this is safe to call again
+ * after the vm.kswapd_threads sysctl has been increased.
+ */
+static int kswapd_per_node_run(int nid)
+{
+	pg_data_t *pgdat = NODE_DATA(nid);
+	int hid, ret = 0;
+
+	for (hid = 0; hid < kswapd_threads; ++hid) {
+		if (pgdat->mkswapd[hid])
+			continue;
+
+		pgdat->mkswapd[hid] = kthread_run(kswapd, pgdat,
+						  "kswapd%d:%d", nid, hid);
+		if (IS_ERR(pgdat->mkswapd[hid])) {
+			/* failure at boot is fatal */
+			BUG_ON(system_state < SYSTEM_RUNNING);
+			pr_err("Failed to start kswapd%d on node %d\n",
+			       hid, nid);
+			ret = PTR_ERR(pgdat->mkswapd[hid]);
+			pgdat->mkswapd[hid] = NULL;
+		}
+	}
+
+	return ret;
+}
+
+/*
+ * Stop all kswapd threads currently running for a single node.
+ */
+static void kswapd_per_node_stop(int nid)
+{
+	pg_data_t *pgdat = NODE_DATA(nid);
+	struct task_struct *kswapd;
+	int hid;
+
+	for (hid = 0; hid < MAX_KSWAPD_THREADS; hid++) {
+		kswapd = pgdat->mkswapd[hid];
+		if (kswapd) {
+			kthread_stop(kswapd);
+			pgdat->mkswapd[hid] = NULL;
+		}
+	}
 }
 
 /*
@@ -4257,21 +4317,7 @@ static int kswapd_cpu_online(unsigned int cpu)
  */
 int kswapd_run(int nid)
 {
-	pg_data_t *pgdat = NODE_DATA(nid);
-	int ret = 0;
-
-	if (pgdat->kswapd)
-		return 0;
-
-	pgdat->kswapd = kthread_run(kswapd, pgdat, "kswapd%d", nid);
-	if (IS_ERR(pgdat->kswapd)) {
-		/* failure at boot is fatal */
-		BUG_ON(system_state < SYSTEM_RUNNING);
-		pr_err("Failed to start kswapd on node %d\n", nid);
-		ret = PTR_ERR(pgdat->kswapd);
-		pgdat->kswapd = NULL;
-	}
-	return ret;
+	return kswapd_per_node_run(nid);
 }
 
 /*
@@ -4280,12 +4326,47 @@ int kswapd_run(int nid)
  */
 void kswapd_stop(int nid)
 {
-	struct task_struct *kswapd = NODE_DATA(nid)->kswapd;
+	kswapd_per_node_stop(nid);
+}
 
-	if (kswapd) {
-		kthread_stop(kswapd);
-		NODE_DATA(nid)->kswapd = NULL;
+/*
+ * Bring the number of running kswapd threads per node in line with the
+ * current value of the vm.kswapd_threads sysctl.
+ */
+static void update_kswapd_threads(void)
+{
+	int nid;
+
+	if (kswapd_threads == kswapd_threads_current)
+		return;
+
+	for_each_node_state(nid, N_MEMORY) {
+		pr_info("Updating kswapd threads on node %d to %d\n",
+			nid, kswapd_threads);
+		kswapd_per_node_stop(nid);
+		kswapd_per_node_run(nid);
 	}
+
+	kswapd_threads_current = kswapd_threads;
+}
+
+/*
+ * sysctl handler for vm.kswapd_threads.  Clamps the requested value to
+ * [1, MAX_KSWAPD_THREADS] and (re)starts the kswapd threads accordingly.
+ */
+int kswapd_threads_sysctl_handler(struct ctl_table *table, int write,
+	void __user *buffer, size_t *length, loff_t *ppos)
+{
+	int rc;
+
+	rc = proc_dointvec_minmax(table, write, buffer, length, ppos);
+	if (rc)
+		return rc;
+
+	if (write)
+		update_kswapd_threads();
+
+	return 0;
 }
 
 static int __init kswapd_init(void)

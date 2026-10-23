@@ -43,6 +43,9 @@
  */
 #define ZRAM_FLAG_SHIFT 24
 
+/* Only 2 bits are allowed for comp priority index */
+#define ZRAM_COMP_PRIORITY_MASK	0x3
+
 /* Flags for zram pages (table[page_no].flags) */
 enum zram_pageflags {
 	/* zram slot is locked */
@@ -54,6 +57,11 @@ enum zram_pageflags {
 	ZRAM_IDLE,	/* not accessed page since last idle marking */
 
 	ZRAM_IDLE_FAST,	/* not accessed page since last idle_fast marking */
+	ZRAM_INCOMPRESSIBLE, /* none of the algorithms could compress it */
+
+	ZRAM_COMP_PRIORITY_BIT1, /* First bit of comp priority index */
+	ZRAM_COMP_PRIORITY_BIT2, /* Second bit of comp priority index */
+
 	__NR_ZRAM_PAGEFLAGS,
 };
 
@@ -107,10 +115,34 @@ struct zram_hash {
 	struct rb_root rb_root;
 };
 
+#ifdef CONFIG_ZRAM_MULTI_COMP
+/*
+ * Multi-comp (recompression) support. Priority 0 is the primary compression
+ * algorithm (zram->comp / zram->compressor); priorities 1..ZRAM_MAX_COMPS-1
+ * are optional secondary algorithms used to recompress cold pages.
+ */
+#define ZRAM_PRIMARY_COMP	0U
+#define ZRAM_SECONDARY_COMP	1U
+#define ZRAM_MAX_COMPS		4U
+#else
+#define ZRAM_PRIMARY_COMP	0U
+#define ZRAM_SECONDARY_COMP	0U
+#define ZRAM_MAX_COMPS		1U
+#endif
+
 struct zram {
 	struct zram_table_entry *table;
 	struct zs_pool *mem_pool;
 	struct zcomp *comp;
+#ifdef CONFIG_ZRAM_MULTI_COMP
+	/*
+	 * Secondary (recompression) backends. Index 0 is unused: the primary
+	 * lives in ->comp above so that the existing hot paths stay untouched.
+	 */
+	struct zcomp *recomps[ZRAM_MAX_COMPS];
+	const char *recomp_algs[ZRAM_MAX_COMPS];
+	s8 num_active_comps;
+#endif
 	struct gendisk *disk;
 	struct zram_hash *hash;
 	size_t hash_size;

@@ -722,6 +722,13 @@ struct deferred_split {
  * per-zone basis.
  */
 struct bootmem_data;
+
+/*
+ * Maximum number of kswapd threads that may be run per NUMA node.
+ * The active count is controlled via the vm.kswapd_threads sysctl.
+ */
+#define MAX_KSWAPD_THREADS 16
+
 typedef struct pglist_data {
 	struct zone node_zones[MAX_NR_ZONES];
 	struct zonelist node_zonelists[MAX_ZONELISTS];
@@ -754,7 +761,7 @@ typedef struct pglist_data {
 	int node_id;
 	wait_queue_head_t kswapd_wait;
 	wait_queue_head_t pfmemalloc_wait;
-	struct task_struct *kswapd;	/* Protected by
+	struct task_struct *mkswapd[MAX_KSWAPD_THREADS];	/* Protected by
 					   mem_hotplug_begin/end() */
 	int kswapd_order;
 	enum zone_type kswapd_classzone_idx;
@@ -766,6 +773,7 @@ typedef struct pglist_data {
 	enum zone_type kcompactd_classzone_idx;
 	wait_queue_head_t kcompactd_wait;
 	struct task_struct *kcompactd;
+	bool proactive_compact_trigger;
 #endif
 	/*
 	 * This is a per-node reserve of pages that are not available
